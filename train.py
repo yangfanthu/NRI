@@ -9,17 +9,20 @@ import datetime
 
 import torch.optim as optim
 from torch.optim import lr_scheduler
+from ball_loader import BallDataset
 
 from utils import *
 from modules import *
+
+import pdb
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--no-cuda', action='store_true', default=False,
                     help='Disables CUDA training.')
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
-parser.add_argument('--epochs', type=int, default=500,
+parser.add_argument('--epochs', type=int, default=50,
                     help='Number of epochs to train.')
-parser.add_argument('--batch-size', type=int, default=128,
+parser.add_argument('--batch-size', type=int, default=32,
                     help='Number of samples per batch.')
 parser.add_argument('--lr', type=float, default=0.0005,
                     help='Initial learning rate.')
@@ -29,7 +32,7 @@ parser.add_argument('--decoder-hidden', type=int, default=256,
                     help='Number of hidden units.')
 parser.add_argument('--temp', type=float, default=0.5,
                     help='Temperature for Gumbel softmax.')
-parser.add_argument('--num-atoms', type=int, default=5,
+parser.add_argument('--num-atoms', type=int, default=3,
                     help='Number of atoms in simulation.')
 parser.add_argument('--encoder', type=str, default='mlp',
                     help='Type of path encoder model (mlp or cnn).')
@@ -50,9 +53,9 @@ parser.add_argument('--load-folder', type=str, default='',
                          'Leave empty to train from scratch')
 parser.add_argument('--edge-types', type=int, default=2,
                     help='The number of edge types to infer.')
-parser.add_argument('--dims', type=int, default=4,
+parser.add_argument('--dims', type=int, default=2,
                     help='The number of input dimensions (position + velocity).')
-parser.add_argument('--timesteps', type=int, default=49,
+parser.add_argument('--timesteps', type=int, default=15,
                     help='The number of time steps per sample.')
 parser.add_argument('--prediction-steps', type=int, default=10, metavar='N',
                     help='Num steps to predict before re-using teacher forcing.')
@@ -180,22 +183,36 @@ if args.cuda:
 rel_rec = Variable(rel_rec)
 rel_send = Variable(rel_send)
 
+whole_dataset = BallDataset()
+train_ratio = 0.7
+val_ration = 0.15
+train_num = int(len(whole_dataset.data) * train_ratio)
+val_num = int(len(whole_dataset.data) * val_ration)
+test_num = len(whole_dataset.data) - train_num - val_num    
+data_num = [train_num, val_num, test_num]
+train_set, val_set, test_set = torch.utils.data.random_split(whole_dataset, data_num)
+train_loader = torch.utils.data.DataLoader(dataset = train_set, batch_size = args.batch_size, shuffle = True)
+valid_loader = torch.utils.data.DataLoader(dataset = val_set, batch_size = args.batch_size, shuffle = True)
+test_loader = torch.utils.data.DataLoader(dataset = test_set, batch_size = args.batch_size, shuffle = True)
+
+
 
 def train(epoch, best_val_loss):
     t = time.time()
     nll_train = []
-    acc_train = []
     kl_train = []
     mse_train = []
 
     encoder.train()
     decoder.train()
     scheduler.step()
-    for batch_idx, (data, relations) in enumerate(train_loader):
+    for batch_idx, data in enumerate(train_loader):
+        # if batch_idx > 2:
+        #     break
 
         if args.cuda:
-            data, relations = data.cuda(), relations.cuda()
-        data, relations = Variable(data), Variable(relations)
+            data = data.cuda()
+        data = Variable(data)
 
         optimizer.zero_grad()
 
@@ -223,28 +240,26 @@ def train(epoch, best_val_loss):
 
         loss = loss_nll + loss_kl
 
-        acc = edge_accuracy(logits, relations)
-        acc_train.append(acc)
 
         loss.backward()
         optimizer.step()
 
-        mse_train.append(F.mse_loss(output, target).data[0])
-        nll_train.append(loss_nll.data[0])
-        kl_train.append(loss_kl.data[0])
+        mse_train.append(F.mse_loss(output, target).data.item())
+        nll_train.append(loss_nll.data.item())
+        kl_train.append(loss_kl.data.item())
 
     nll_val = []
-    acc_val = []
     kl_val = []
     mse_val = []
 
     encoder.eval()
     decoder.eval()
-    for batch_idx, (data, relations) in enumerate(valid_loader):
+    for batch_idx, data in enumerate(valid_loader):
+        # if batch_idx > 2:
+        #     break
         if args.cuda:
-            data, relations = data.cuda(), relations.cuda()
-        data, relations = Variable(data, volatile=True), Variable(
-            relations, volatile=True)
+            data = data.cuda()
+        data = Variable(data, volatile=True)
 
         logits = encoder(data, rel_rec, rel_send)
         edges = gumbel_softmax(logits, tau=args.temp, hard=True)
@@ -257,22 +272,18 @@ def train(epoch, best_val_loss):
         loss_nll = nll_gaussian(output, target, args.var)
         loss_kl = kl_categorical_uniform(prob, args.num_atoms, args.edge_types)
 
-        acc = edge_accuracy(logits, relations)
-        acc_val.append(acc)
 
-        mse_val.append(F.mse_loss(output, target).data[0])
-        nll_val.append(loss_nll.data[0])
-        kl_val.append(loss_kl.data[0])
+        mse_val.append(F.mse_loss(output, target).data.item())
+        nll_val.append(loss_nll.data.item())
+        kl_val.append(loss_kl.data.item())
 
     print('Epoch: {:04d}'.format(epoch),
           'nll_train: {:.10f}'.format(np.mean(nll_train)),
           'kl_train: {:.10f}'.format(np.mean(kl_train)),
           'mse_train: {:.10f}'.format(np.mean(mse_train)),
-          'acc_train: {:.10f}'.format(np.mean(acc_train)),
           'nll_val: {:.10f}'.format(np.mean(nll_val)),
           'kl_val: {:.10f}'.format(np.mean(kl_val)),
           'mse_val: {:.10f}'.format(np.mean(mse_val)),
-          'acc_val: {:.10f}'.format(np.mean(acc_val)),
           'time: {:.4f}s'.format(time.time() - t))
     if args.save_folder and np.mean(nll_val) < best_val_loss:
         torch.save(encoder.state_dict(), encoder_file)
@@ -282,18 +293,15 @@ def train(epoch, best_val_loss):
               'nll_train: {:.10f}'.format(np.mean(nll_train)),
               'kl_train: {:.10f}'.format(np.mean(kl_train)),
               'mse_train: {:.10f}'.format(np.mean(mse_train)),
-              'acc_train: {:.10f}'.format(np.mean(acc_train)),
               'nll_val: {:.10f}'.format(np.mean(nll_val)),
               'kl_val: {:.10f}'.format(np.mean(kl_val)),
               'mse_val: {:.10f}'.format(np.mean(mse_val)),
-              'acc_val: {:.10f}'.format(np.mean(acc_val)),
               'time: {:.4f}s'.format(time.time() - t), file=log)
         log.flush()
     return np.mean(nll_val)
 
 
 def test():
-    acc_test = []
     nll_test = []
     kl_test = []
     mse_test = []
@@ -304,11 +312,12 @@ def test():
     decoder.eval()
     encoder.load_state_dict(torch.load(encoder_file))
     decoder.load_state_dict(torch.load(decoder_file))
-    for batch_idx, (data, relations) in enumerate(test_loader):
+    for batch_idx, data in enumerate(test_loader):
+        # if batch_idx > 2:
+        #     break
         if args.cuda:
-            data, relations = data.cuda(), relations.cuda()
-        data, relations = Variable(data, volatile=True), Variable(
-            relations, volatile=True)
+            data = data.cuda()
+        data = Variable(data, volatile=True)
 
         assert (data.size(2) - args.timesteps) >= args.timesteps
 
@@ -326,12 +335,9 @@ def test():
         loss_nll = nll_gaussian(output, target, args.var)
         loss_kl = kl_categorical_uniform(prob, args.num_atoms, args.edge_types)
 
-        acc = edge_accuracy(logits, relations)
-        acc_test.append(acc)
-
-        mse_test.append(F.mse_loss(output, target).data[0])
-        nll_test.append(loss_nll.data[0])
-        kl_test.append(loss_kl.data[0])
+        mse_test.append(F.mse_loss(output, target).data.item())
+        nll_test.append(loss_nll.data.item())
+        kl_test.append(loss_kl.data.item())
 
         # For plotting purposes
         if args.decoder == 'rnn':
@@ -367,8 +373,7 @@ def test():
     print('--------------------------------')
     print('nll_test: {:.10f}'.format(np.mean(nll_test)),
           'kl_test: {:.10f}'.format(np.mean(kl_test)),
-          'mse_test: {:.10f}'.format(np.mean(mse_test)),
-          'acc_test: {:.10f}'.format(np.mean(acc_test)))
+          'mse_test: {:.10f}'.format(np.mean(mse_test)))
     print('MSE: {}'.format(mse_str))
     if args.save_folder:
         print('--------------------------------', file=log)
@@ -377,7 +382,6 @@ def test():
         print('nll_test: {:.10f}'.format(np.mean(nll_test)),
               'kl_test: {:.10f}'.format(np.mean(kl_test)),
               'mse_test: {:.10f}'.format(np.mean(mse_test)),
-              'acc_test: {:.10f}'.format(np.mean(acc_test)),
               file=log)
         print('MSE: {}'.format(mse_str), file=log)
         log.flush()
@@ -398,7 +402,7 @@ if args.save_folder:
     print("Best Epoch: {:04d}".format(best_epoch), file=log)
     log.flush()
 
-test()
+# test()
 if log is not None:
     print(save_folder)
     log.close()
