@@ -106,8 +106,6 @@ else:
     print("WARNING: No save_folder provided!" +
           "Testing (within this script) will throw an error.")
 
-train_loader, valid_loader, test_loader, loc_max, loc_min, vel_max, vel_min = load_data(
-    args.batch_size, args.suffix)
 
 # Generate off-diagonal interaction graph
 off_diag = np.ones([args.num_atoms, args.num_atoms]) - np.eye(args.num_atoms)
@@ -156,9 +154,6 @@ optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()),
 scheduler = lr_scheduler.StepLR(optimizer, step_size=args.lr_decay,
                                 gamma=args.gamma)
 
-# Linear indices of an upper triangular mx, used for acc calculation
-triu_indices = get_triu_offdiag_indices(args.num_atoms)
-tril_indices = get_tril_offdiag_indices(args.num_atoms)
 
 if args.prior:
     prior = np.array([0.91, 0.03, 0.03, 0.03])  # TODO: hard coded for now
@@ -177,8 +172,6 @@ if args.cuda:
     decoder.cuda()
     rel_rec = rel_rec.cuda()
     rel_send = rel_send.cuda()
-    triu_indices = triu_indices.cuda()
-    tril_indices = tril_indices.cuda()
 
 rel_rec = Variable(rel_rec)
 rel_send = Variable(rel_send)
